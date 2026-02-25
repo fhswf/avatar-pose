@@ -1,0 +1,60 @@
+<!--
+index.html
+
+Authors: Ann-Kristin Schulte, Jonas D. Stephan
+License: Apache License 2.0
+
+Description:
+This HTML file sets up the main structure of the web application.
+It includes a WebGL canvas for rendering a 3D scene and an input field for user interaction.
+The page is styled with basic CSS to ensure a centered layout.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Avatar Pose</title>
+    <style>
+        /* Style for the body to center elements vertically and horizontally */
+        body {
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            flex-direction: column;
+            font-size: 24px;
+        }
+
+        /* Style for paragraph spacing */
+        p {
+            margin-top: 4px;
+        }
+
+        /* Style for the input field */
+        input {
+            font-size: 18px;
+            padding: 5px;
+            border: 2px solid #000;
+            border-radius: 5px;
+            width: 500px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Load the main JavaScript module -->
+    <script type="module" src="/index.js"></script>
+
+    <!-- WebGL canvas for rendering 3D scene -->
+    <canvas class="webgl"></canvas>
+
+    <!-- Horizontal line separator -->
+    <hr style="height: 1px; width: 99%;">
+
+    <!-- Input field for text translation -->
+    <p>
+        Text to translate: <input id="text_input" />
+    </p>
+</body>
+</html>

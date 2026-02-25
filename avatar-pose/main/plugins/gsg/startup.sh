@@ -1,0 +1,1 @@
+python -m spacy download de_core_news_sm # check qeather possible to add in requirements.txt

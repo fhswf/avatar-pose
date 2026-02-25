@@ -1,0 +1,12 @@
+webviewer/node_modules/
+webviewer/.env.local
+.venv
+.idea
+*.pev
+/main/ws-test.py
+/main/plugins/gsg/videos/
+/main/plugins/gsg/decoder.pt
+/main/plugins/gsg/encoder.pt
+/main/plugins/gsg/wordlist.csv
+/text_to_gloss/data/
+/main/plugins/gsg/dgs-de.txt
