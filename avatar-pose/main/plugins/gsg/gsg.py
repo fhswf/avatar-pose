@@ -10,6 +10,7 @@ It reads JSON data, computes final rotations using the Calculator class, and sen
 frames to the output hook.
 """
 import csv
+import json
 import torch
 import spacy
 import sys
@@ -50,6 +51,8 @@ class gsg(LangPlugin):
 
         self.nlp = spacy.load("de_core_news_sm")
         self.data={}
+        #TODO: Umbau zu pandas DataFrame, um effizienter zu sein
+        
         with open("plugins/gsg/wordlist.csv", newline='', encoding='utf-8') as csvfile:
             reader=csv.DictReader(csvfile)
             for row in reader:
@@ -68,17 +71,37 @@ class gsg(LangPlugin):
         """
         doc = self.nlp(string)
         names = [ent.text for ent in doc.ents if ent.label_ in ["PER", "LOC", "ORG", "MISC"]]
-        # TODO
-        print(string)
+        
         names = [name for name in names if name not in self.known_names]
 
         for name in names:
             string = string.replace(name, preprocess_unknown_signs(name))
 
+        #TODO: Hier Code effizienter gestalten
         words=string.split()
         for word in words:
             if word not in self.data:
                 string=string.replace(word, preprocess_unknown_signs(word))
+                
+        signs = string.split("|")
+        
+        for sign in signs:
+            id=0
+            for key, value in self.data.items():
+                if sign == key:
+                    id = value["id"]
+                    break
+        
+            #TODO: Hier Quelltext einfügen
+
+            with open(f'plugins/gsg/extracted_videos/{id}.pev') as file:
+                data = json.load(file)
+
+            for i in range(len(data["frames"])):
+                self.output_hook.add_send_object(
+                    self.calculator.compute_final_rotations(data["frames"][i].get("skeletonpoints"))
+                )    
+            
 
     def load_model(self, encoder, decoder, encoder_path, decoder_path, device):
         """
