@@ -58,7 +58,9 @@ class AttnDecoderRNN(nn.Module):
         :rtype: tuple(torch.Tensor, torch.Tensor, torch.Tensor)
         """
         batch_size = encoder_outputs.size(0)
-        decoder_input = torch.empty(batch_size, 1, dtype=torch.long, device=device).fill_(SOS_token)
+        # Verwende das Device von encoder_outputs anstelle der device-Variable
+        decoder_input = torch.empty(batch_size, 1, dtype=torch.long, device=encoder_outputs.device).fill_(SOS_token)
+        #decoder_input = torch.empty(batch_size, 1, dtype=torch.long, device=device).fill_(SOS_token)
         decoder_hidden = encoder_hidden
         decoder_outputs = []
         attentions = []

@@ -17,6 +17,16 @@ from training import train
 from evaluation import evaluate_random_BLEU
 import torch
 from data_processing import prepare_train_test_data
+from pathlib import Path # neu
+import os # neu
+import sys # neu
+
+# 1. Standard-Streams erzwingen, UTF-8 zu nutzen #neu
+sys.stdout.reconfigure(encoding='utf-8') #neu
+sys.stderr.reconfigure(encoding='utf-8') #neu
+
+# 2. Arbeitsverzeichnis im Projektordner erzwingen #neu
+os.chdir(Path(__file__).resolve().parent) #neu
 
 # Set device for computation
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -27,8 +37,17 @@ batch_size = 64
 n_epochs = 50
 learning_rate = 0.001
 
+# Skript-Ordner dynamisch ermitteln
+script_dir = Path(__file__).resolve().parent #neu
+
+# Absoluten Pfad zum data-Ordner erstellen
+data_dir = script_dir / "data" #neu
+
+# Prepare dataset mit absolutem Pfad aufrufen
+prepare_train_test_data("Text2Gloss.csv", str(data_dir), retrain_model=True) #neu
+
 # Prepare dataset for training and testing
-prepare_train_test_data("Text2Gloss.csv", "data", retrain_model=True)
+#prepare_train_test_data("Text2Gloss.csv", "data", retrain_model=True)
 
 # Load data and prepare vocabulary
 input_lang, output_lang, train_dataloader, pairs = get_dataloader("dgs","de", batch_size, device)

@@ -14,7 +14,8 @@ import torch.nn as nn
 import torch
 from evaluation import evaluate_BLEU
 
-def train_epoch(dataloader, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion):
+def train_epoch(dataloader, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, device):
+    #device ergänzt
     """
     Trains the model for one epoch.
 
@@ -84,7 +85,8 @@ def train(dataloader, encoder, decoder, n_epochs, input_lang, output_lang, devic
     criterion = nn.NLLLoss()
 
     for epoch in range(1, n_epochs + 1):
-        epoch_loss = train_epoch(dataloader, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
+        epoch_loss = train_epoch(dataloader, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, device)
+        # neu device ergänzt
 
         #print(f"Epoch {epoch}/{n_epochs} - Loss: {epoch_loss:.4f}")
         # Evaluate model performance using BLEU score
