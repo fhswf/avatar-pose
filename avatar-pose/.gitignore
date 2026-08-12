@@ -1,5 +1,6 @@
 webviewer/node_modules/
 webviewer/.env.local
+/webviewer/.env
 .venv
 .idea
 *.pev
@@ -10,3 +11,5 @@ webviewer/.env.local
 /main/plugins/gsg/wordlist.csv
 /text_to_gloss/data/
 /main/plugins/gsg/dgs-de.txt
+*.pyc
+
