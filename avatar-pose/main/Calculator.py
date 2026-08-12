@@ -32,6 +32,48 @@ class Calculator:
         with open('data/bone_mapping.json', "r") as mapping_file:
             self.mapping = json.load(mapping_file)
 
+        # Sort skeleton to guarantee topological ordering (parents before children)
+        self.sorted_bones = self.sort_skeleton(self.t_pose)
+
+        # Compute rest global transformations for T-pose
+        self.init_rest_transforms()
+
+    def init_rest_transforms(self):
+        """
+        Pre-computes the global 4x4 matrices, world positions, and global rotations
+        for all bones in rest state (T-pose). Also populates 'position' in self.t_pose entries.
+        """
+        self.global_rest_matrices = {}
+        self.global_rest_positions = {}
+        self.global_rest_rotations = {}
+
+        for bone_name, bone in self.sorted_bones.items():
+            local_trans = bone.get("translation", np.zeros(3))
+            local_rot_quat = bone.get("rotation", np.array([0, 0, 0, 1]))
+
+            # Ensure rotation quaternion is normalized
+            if np.linalg.norm(local_rot_quat) > 1e-6:
+                local_rot_quat = np.array(local_rot_quat, dtype=np.float64) / np.linalg.norm(local_rot_quat)
+            else:
+                local_rot_quat = np.array([0, 0, 0, 1], dtype=np.float64)
+
+            local_mat = np.identity(4)
+            local_mat[:3, :3] = R.from_quat(local_rot_quat).as_matrix()
+            local_mat[:3, 3] = local_trans
+
+            parent_name = bone.get("parent")
+            if parent_name and parent_name in self.global_rest_matrices:
+                global_mat = np.dot(self.global_rest_matrices[parent_name], local_mat)
+            else:
+                global_mat = local_mat
+
+            self.global_rest_matrices[bone_name] = global_mat
+            self.global_rest_positions[bone_name] = global_mat[:3, 3]
+            self.global_rest_rotations[bone_name] = R.from_matrix(global_mat[:3, :3])
+
+            # Populate position field in self.t_pose for backward compatibility
+            bone["position"] = global_mat[:3, 3]
+
     @staticmethod
     def quaternion_from_two_vectors(v_start, v_target):
         """
@@ -41,15 +83,20 @@ class Calculator:
         :type v_start: np.ndarray
         :param v_target: Target vector.
         :type v_target: np.ndarray
-        :return: Quaternion representing the rotation.
+        :return: Quaternion representing the rotation [x, y, z, w].
         :rtype: np.ndarray
         """
-        if np.linalg.norm(v_start) < 1e-6 or np.linalg.norm(v_target) < 1e-6:
+        norm_start = np.linalg.norm(v_start)
+        norm_target = np.linalg.norm(v_target)
+        if norm_start < 1e-6 or norm_target < 1e-6:
             return np.array([0, 0, 0, 1])  # Identity quaternion fallback
 
-        v_start /= np.linalg.norm(v_start)
-        v_target /= np.linalg.norm(v_target)
+        v_start = v_start / norm_start
+        v_target = v_target / norm_target
         dot = np.dot(v_start, v_target)
+
+        if dot > 0.999999:
+            return np.array([0, 0, 0, 1])
 
         if dot < -0.999999:
             axis = np.cross(v_start, np.array([1, 0, 0]))
@@ -59,23 +106,19 @@ class Calculator:
             return R.from_rotvec(np.pi * axis).as_quat()
 
         axis = np.cross(v_start, v_target)
-        if np.linalg.norm(axis) < 1e-6:
+        axis_norm = np.linalg.norm(axis)
+        if axis_norm < 1e-6:
             return np.array([0, 0, 0, 1])
 
-        angle = np.arccos(dot)
-        return R.from_rotvec(angle * axis / np.linalg.norm(axis)).as_quat()
+        angle = np.arccos(np.clip(dot, -1.0, 1.0))
+        return R.from_rotvec(angle * axis / axis_norm).as_quat()
 
     @staticmethod
     def convert_to_threejs_coords(vector):
         """
-        Converts coordinates to Three.js format.
-
-        :param vector: Dictionary containing 'x', 'y', 'z' values.
-        :type vector: dict
-        :return: Converted NumPy array.
-        :rtype: np.ndarray
+        Converts coordinates to Three.js format. Raw PEV coordinates have +Y pointing UP.
         """
-        return np.array([vector["x"], -vector["y"], -vector["z"]])
+        return np.array([vector["x"], vector["y"], vector["z"]])
 
     def shift_origin_poe_data(self, poe_data):
         """
@@ -109,7 +152,8 @@ class Calculator:
 
     def get_target_position(self, bone_name, poe_data, point_type="head"):
         """
-        Retrieves the target position for a bone from POE data based on mapping.
+        Retrieves the target position for a bone from POE data based on mapping,
+        handling side-specific X-axis alignment (Left arm +X vs Right arm -X).
 
         :param bone_name: Name of the bone.
         :type bone_name: str
@@ -127,16 +171,30 @@ class Calculator:
         target_ids = bone_map.get(point_type)
 
         if target_ids is None:
-            print(f"Warning: No {point_type} point found for {bone_name}.")
             return np.array([0.0, 0.0, 0.0])
 
         if isinstance(target_ids, list):
             positions = [self.get_point_position(target_id, poe_data) for target_id in target_ids]
             positions = [pos for pos in positions if np.linalg.norm(pos) > 1e-6]
             if positions:
-                return np.mean(positions, axis=0)
+                pos = np.mean(positions, axis=0)
+            else:
+                pos = np.array([0.0, 0.0, 0.0])
+        else:
+            pos = self.get_point_position(target_ids, poe_data)
 
-        return self.get_point_position(target_ids, poe_data)
+        # X-axis alignment:
+        # In the PEV coordinate system (mirrored camera), both arms extend in the same
+        # raw X direction, but the Avatar's T-pose has _l at +X and _r at -X.
+        # Therefore we invert X for _l (raw -X → avatar +X) and also invert X for _r
+        # when the raw wrist position crosses over to the opposite side of the image
+        # (e.g. hand raised towards chest). Invert X consistently for all lateral bones.
+        if bone_name.endswith("_l"):
+            return np.array([-pos[0], pos[1], pos[2]])
+        elif bone_name.endswith("_r"):
+            return np.array([-pos[0], pos[1], pos[2]])
+        else:
+            return pos
 
     @staticmethod
     def get_point_position(point_id, poe_data):
@@ -157,53 +215,76 @@ class Calculator:
 
     def compute_final_rotations(self, poe_data):
         """
-        Computes the final quaternions for all bones based on hierarchy.
+        Computes the final quaternions for all bones based on Forward Kinematics hierarchy.
 
         :param poe_data: List of position data.
         :type poe_data: list
-        :return: Dictionary of final rotations.
+        :return: Dictionary of final rotations per bone.
         :rtype: dict
         """
-        poe_data = self.shift_origin_poe_data(poe_data)
+        shifted_poe = self.shift_origin_poe_data(poe_data)
         final_rotations = {}
+        global_pose_rotations = {}
 
-        for bone_name, bone in self.t_pose.items():
+        for bone_name, bone in self.sorted_bones.items():
             if bone_name == "KIM_caucasian_male.body":
                 continue
 
-            parent_name = bone.get('parent')
-            first_child_name = bone['children'][0] if bone.get('children') else None
-            final_rotations.setdefault(bone_name, {})
+            parent_name = bone.get("parent")
+            first_child_name = bone["children"][0] if bone.get("children") else None
 
-            if self.mapping.get(bone_name, {}).get("ignore", False) or parent_name is None:
-                final_rotations[bone_name] = {'rotation': np.array(bone['rotation'])}
-                continue
-
-            start_head_pos = np.array(bone['position'])
-            start_tail_pos = np.array(self.t_pose[first_child_name]['position']) if first_child_name else start_head_pos
-            target_head_pos = self.get_target_position(bone_name, poe_data, point_type="head")
-            target_tail_pos = self.get_target_position(bone_name, poe_data, point_type="tail")
-
-            start_vector = start_tail_pos - start_head_pos
-            target_vector = target_tail_pos - target_head_pos
-
-            if np.linalg.norm(target_vector) < 1e-7:
-                final_rotations[bone_name]['rotation'] = self.t_pose[bone_name]['rotation']
-                continue
-
-            rotation_quat = self.quaternion_from_two_vectors(start_vector, target_vector)
-            bone_quat = np.array(bone['rotation'])
-            if np.linalg.norm(bone_quat) > 1e-6:
-                bone_quat /= np.linalg.norm(bone_quat)
+            # Retrieve rest global and local rotations
+            rest_global_rot = self.global_rest_rotations[bone_name]
+            rest_local_quat = bone.get("rotation", np.array([0, 0, 0, 1]))
+            if np.linalg.norm(rest_local_quat) > 1e-6:
+                rest_local_quat = np.array(rest_local_quat, dtype=np.float64) / np.linalg.norm(rest_local_quat)
             else:
-                bone_quat = np.array([0, 0, 0, 1])
+                rest_local_quat = np.array([0, 0, 0, 1], dtype=np.float64)
+            rest_local_rot = R.from_quat(rest_local_quat)
 
-            final_quat = R.from_quat(rotation_quat) * R.from_quat(bone_quat)
-            final_rotations[bone_name]['rotation'] = final_quat.as_quat()
+            parent_global_pose_rot = global_pose_rotations.get(parent_name, R.identity())
+
+            # Check if bone is ignored or unmapped
+            is_ignored = self.mapping.get(bone_name, {}).get("ignore", False)
+
+            if is_ignored:
+                local_pose_rot = rest_local_rot
+                global_pose_rot = parent_global_pose_rot * local_pose_rot
+            else:
+                head_pos = self.global_rest_positions[bone_name]
+                if first_child_name:
+                    tail_pos = self.global_rest_positions[first_child_name]
+                else:
+                    tail_pos = head_pos
+
+                start_vector = tail_pos - head_pos
+                target_head_pos = self.get_target_position(bone_name, shifted_poe, point_type="head")
+                target_tail_pos = self.get_target_position(bone_name, shifted_poe, point_type="tail")
+                target_vector = target_tail_pos - target_head_pos
+
+                if np.linalg.norm(start_vector) < 1e-6 or np.linalg.norm(target_vector) < 1e-6:
+                    local_pose_rot = rest_local_rot
+                    global_pose_rot = parent_global_pose_rot * local_pose_rot
+                else:
+                    # World delta rotation from start_vector to target_vector
+                    delta_quat = self.quaternion_from_two_vectors(start_vector, target_vector)
+                    delta_rot = R.from_quat(delta_quat)
+
+                    # World pose rotation
+                    global_pose_rot = delta_rot * rest_global_rot
+
+                    # Convert to local rotation relative to parent pose rotation
+                    if parent_name and parent_name in global_pose_rotations:
+                        local_pose_rot = parent_global_pose_rot.inv() * global_pose_rot
+                    else:
+                        local_pose_rot = global_pose_rot
+
+            global_pose_rotations[bone_name] = global_pose_rot
+            final_rotations[bone_name] = {"rotation": local_pose_rot.as_quat()}
 
         return final_rotations
 
-    @ staticmethod
+    @staticmethod
     def slerp(q1, q2, t):
         """
         Performs Spherical Linear Interpolation (SLERP) between two quaternions.
@@ -220,30 +301,22 @@ class Calculator:
         q1 = np.array(q1, dtype=np.float64)
         q2 = np.array(q2, dtype=np.float64)
 
-        # Compute the dot product (cosine of the angle between q1 and q2)
         dot = np.dot(q1, q2)
 
-        # If dot product is negative, negate q2 to ensure shortest path interpolation
         if dot < 0.0:
             q2 = -q2
             dot = -dot
 
-        # Clamp the dot product to prevent numerical errors in arccos
         dot = np.clip(dot, -1.0, 1.0)
+        theta_0 = np.arccos(dot)
+        theta = theta_0 * t
 
-        # Compute the angle between the quaternions
-        theta_0 = np.arccos(dot)  # Original angle
-        theta = theta_0 * t  # Interpolated angle
-
-        # Compute the sine values for interpolation
         sin_theta = np.sin(theta)
         sin_theta_0 = np.sin(theta_0)
 
-        # If the angle is too small, use linear interpolation to avoid division by zero
         if sin_theta_0 < 1e-6:
             return (1 - t) * q1 + t * q2
 
-        # Compute the interpolation coefficients
         s1 = np.sin((1 - t) * theta) / sin_theta_0
         s2 = sin_theta / sin_theta_0
 
@@ -300,4 +373,4 @@ class Calculator:
                             back[key] = tmp_t_pose[key]
                     else:
                         back[key] = tmp_t_pose[key]
-        return back
+        return back
