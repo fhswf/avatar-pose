@@ -9,10 +9,12 @@ This script initializes and starts the UnifiedWebSocket server.
 It dynamically loads a specified language module and runs the WebSocket server
 for real-time communication.
 """
-
+import os
 import asyncio
 import importlib
 from UnifiedWebSocket import UnifiedWebSocket
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 if __name__ == "__main__":
     """
