@@ -183,18 +183,7 @@ class Calculator:
         else:
             pos = self.get_point_position(target_ids, poe_data)
 
-        # X-axis alignment:
-        # In the PEV coordinate system (mirrored camera), both arms extend in the same
-        # raw X direction, but the Avatar's T-pose has _l at +X and _r at -X.
-        # Therefore we invert X for _l (raw -X → avatar +X) and also invert X for _r
-        # when the raw wrist position crosses over to the opposite side of the image
-        # (e.g. hand raised towards chest). Invert X consistently for all lateral bones.
-        if bone_name.endswith("_l"):
-            return np.array([-pos[0], pos[1], pos[2]])
-        elif bone_name.endswith("_r"):
-            return np.array([-pos[0], pos[1], pos[2]])
-        else:
-            return pos
+        return pos
 
     @staticmethod
     def get_point_position(point_id, poe_data):
