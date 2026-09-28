@@ -78,19 +78,18 @@ class gsg(LangPlugin):
             string = string.replace(name, preprocess_unknown_signs(name))
 
         #TODO: Hier Code effizienter gestalten
-        words=string.split()
+        words = string.split()
         for word in words:
-            if word not in self.data:
-                string=string.replace(word, preprocess_unknown_signs(word))
+            if word.upper() not in self.data:
+                string = string.replace(word, preprocess_unknown_signs(word))
                 
         signs = string.split("|")
         
         for sign in signs:
-            id=0
-            for key, value in self.data.items():
-                if sign == key:
-                    id = value["id"]
-                    break
+            id = 0
+            sign_upper = sign.upper()
+            if sign_upper in self.data:
+                id = self.data[sign_upper]["id"]
         
             #TODO: Hier Quelltext einfügen
 
