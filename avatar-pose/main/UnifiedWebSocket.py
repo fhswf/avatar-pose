@@ -17,6 +17,11 @@ import numpy as np
 from pygltflib import GLTF2
 import copy
 
+# So viele Frames bleiben im Puffer, bevor die aeltesten verworfen werden
+# (30 fps * 30 s). Ein Client, der laenger hinterherhaengt, springt nach vorn.
+HISTORY_FRAMES = 900
+
+
 class UnifiedWebSocket:
     """
     A WebSocket server for real-time communication, handling skeletal transformations and data exchange.
@@ -37,7 +42,12 @@ class UnifiedWebSocket:
             if 'translation' in first_position[key]:
                 del first_position[key]['translation']
 
+        # send_objects ist ein Ringpuffer der zuletzt erzeugten Frames. Jede
+        # Verbindung liest mit einem eigenen Zeiger, damit mehrere Clients
+        # (z. B. ein alter Browser-Tab) sich die Animation nicht gegenseitig
+        # wegnehmen. _next_index ist die laufende Nummer des naechsten Frames.
         self.send_objects = [first_position]
+        self._next_index = 1
 
     async def start_server(self):
         """
@@ -56,7 +66,14 @@ class UnifiedWebSocket:
         """
         consumer_task = asyncio.create_task(self.receive_data(websocket))
         producer_task = asyncio.create_task(self.send_data(websocket))
-        await asyncio.gather(consumer_task, producer_task)
+        try:
+            await asyncio.gather(consumer_task, producer_task,
+                                 return_exceptions=True)
+        finally:
+            for task in (consumer_task, producer_task):
+                task.cancel()
+            await asyncio.gather(consumer_task, producer_task,
+                                 return_exceptions=True)
 
     async def receive_data(self, websocket):
         """
@@ -77,17 +94,33 @@ class UnifiedWebSocket:
         """
         Sends outgoing data to the WebSocket client at a fixed frame rate.
 
+        Jede Verbindung hat ihren eigenen Lesezeiger in den gemeinsamen
+        Frame-Puffer. Neue Frames werden also an alle Clients verteilt statt
+        von dem Client verbraucht, der zufaellig zuerst sendet. Ist der Puffer
+        leer, wird der zuletzt gesendete Frame wiederholt.
+
         :param websocket: The WebSocket connection.
         :type websocket: websockets.WebSocketServerProtocol
         """
-        while True:
-            if len(self.send_objects) > 1:
-                actual_frame = self.send_objects.pop(0)
-            else:
-                actual_frame = self.send_objects[0]
+        oldest = self._next_index - len(self.send_objects)
+        cursor = max(oldest, self._next_index - 1)
+        last_frame = self.send_objects[-1]
+        try:
+            while True:
+                oldest = self._next_index - len(self.send_objects)
+                if cursor < oldest:
+                    # Der Client war langsamer als der Ringpuffer; auf den
+                    # aeltesten noch vorhandenen Frame springen.
+                    cursor = oldest
+                if cursor < self._next_index:
+                    last_frame = self.send_objects[cursor - oldest]
+                    cursor += 1
 
-            await websocket.send(json.dumps(self.convert_numpy_to_list(actual_frame)))
-            await asyncio.sleep(1 / 30)
+                await websocket.send(
+                    json.dumps(self.convert_numpy_to_list(last_frame)))
+                await asyncio.sleep(1 / 30)
+        except websockets.exceptions.ConnectionClosed:
+            pass
 
     def add_send_object(self, send_object):
         """
@@ -97,6 +130,10 @@ class UnifiedWebSocket:
         :type send_object: dict
         """
         self.send_objects.append(send_object)
+        self._next_index += 1
+        # Etwa 30 Sekunden Historie reichen fuer den langsamsten Client.
+        if len(self.send_objects) > HISTORY_FRAMES:
+            del self.send_objects[:len(self.send_objects) - HISTORY_FRAMES]
 
     def get_t_pose(self):
         """

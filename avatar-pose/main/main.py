@@ -24,8 +24,8 @@ if __name__ == "__main__":
     - Initializes the WebSocket server.
     - Starts the server asynchronously.
     """
-    # TODO: Change to environmental value
-    language = "gsg"
+    # Plugin per Umgebungsvariable waehlen, Standard bleibt "gsg".
+    language = os.environ.get("AVATAR_PLUGIN", "gsg").strip() or "gsg"
     language_module = importlib.import_module(f"plugins.{language}.{language}")
     language_class = getattr(language_module, language)
 

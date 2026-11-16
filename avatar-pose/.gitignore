@@ -1,11 +1,15 @@
 webviewer/node_modules/
+/main/.vite/
 webviewer/.env.local
 /webviewer/.env
 .venv
 .idea
 *.pev
+*.pev.bak
+*.pev.tmp
 /main/ws-test.py
 /main/plugins/gsg/videos/
+/main/plugins/gsg/video_cache/
 /main/plugins/gsg/decoder.pt
 /main/plugins/gsg/encoder.pt
 /main/plugins/gsg/wordlist.csv

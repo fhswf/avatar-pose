@@ -40,6 +40,114 @@ Die Avatar-Pipeline kann verwendet werden für:
 - Forschung zur Darstellung von Gebärdensprache
 - Bildungswerkzeuge für die Gehörlosengemeinschaft
 
+---
+
+## Pose-Retargeting / Pose retargeting
+
+RTMLib/COCO-WholeBody keypoints can drive the avatar without MediaPipe:
+
+- `retarget/` – landmarks to bone rotations, CLI, tests; details in `retarget/README.md`
+- `python -m retarget retarget aufnahme.json -o kurven.json --frames frames.json`
+- `AVATAR_PLUGIN=retarget AVATAR_RETARGET_CURVES=kurven.json python main.py` (in `avatar-pose/main`)
+- In the webviewer text field press Enter or type the path to a curves/RTMLib JSON.
+- Type a word from the gsg list (e.g. `Auto`) to look it up in
+  `plugins/gsg/wordlist.csv`, load its SignDict video, extract
+  COCO-WholeBody keypoints with RTMLib and play the result. Both arms follow
+  the landmarks; the clip starts and ends in the avatar's T-pose (the glTF
+  rest pose). `.pev` files are only a fallback because many of them are
+  corrupted by 3D lifting.
+- The video/keypoint cache lives in `main/plugins/gsg/video_cache` (ignored by
+  git). `AVATAR_RETARGET_CACHE` points it elsewhere,
+  `AVATAR_RETARGET_ANCHOR=none` disables the T-pose blend.
+- `AVATAR_RETARGET_ARM_MODE=sign|both|auto` selects which arms follow the
+  landmarks (default `auto`: both for RTMLib video, signing arm for `.pev`).
+
+### Creating and repairing `.pev` files
+
+`DataLoaderDGS/Extractor.py` converts `videos-cut/**/*.mp4` into
+`extracted/**/*.pev`:
+
+```bash
+python DataLoaderDGS/Extractor.py --dataset_path /path/to/sign-language-avatar-gloss-dgs
+python DataLoaderDGS/Extractor.py --dataset_path ... --limit 3 --overwrite
+python DataLoaderDGS/Extractor.py --dataset_path ... --backend official
+```
+
+The default backend `rtmlib` uses the installed `rtmlib.Wholebody`
+(COCO-WholeBody, 133 points) and needs no 3D lifting. `--backend official`
+switches to `RTMPoseEstimator3D`, which additionally requires
+`pose_estimation_recognition_utils`. Both backends mirror x, turn y upwards and
+rebuild z from the 2D foreshortening, so newly written files do not have the
+collapsed depth described below. `--device auto` uses CUDA when onnxruntime
+offers it, `--front-sign -1` flips the arm depth.
+
+Older files created by the previous extractor were lifted to 3D, but
+`_denormalize_by_bounding_box` only rescales x and y. The z component stays in
+the lifting model's normalised range, so it is about 1000× too small
+(x/y ≈ 1e5, z ≈ 1e2). `Calculator.compute_final_rotations` reads the points as
+Three.js coordinates, so with a constant z every bone lies in the image plane
+and the arms disappear inside the torso. A factor cannot fix this, because the
+lifted z is not even consistent in direction.
+
+`DataLoaderDGS/repair_pev.py` rebuilds z from the 2D foreshortening
+(`sqrt(L² - p²)` plus a forward base, the same idea as `retarget/depth.py`):
+
+```bash
+python DataLoaderDGS/repair_pev.py check            # status per file
+python DataLoaderDGS/repair_pev.py repair --dry-run # show what would change
+python DataLoaderDGS/repair_pev.py repair           # backup *.pev.bak, then rewrite z
+python DataLoaderDGS/repair_pev.py sync --repair    # copy from the dataset + fix
+```
+
+`x`/`y` and all other fields stay untouched; `--front-sign -1` flips the
+reconstructed depth if the arms should point backwards. The retarget plugin
+does not need this step because it reads the keypoints straight from the video.
+
+### `.pev`-Dateien erzeugen und reparieren
+
+`DataLoaderDGS/Extractor.py` wandelt `videos-cut/**/*.mp4` in
+`extracted/**/*.pev` um:
+
+```bash
+python DataLoaderDGS/Extractor.py --dataset_path /pfad/zu/sign-language-avatar-gloss-dgs
+python DataLoaderDGS/Extractor.py --dataset_path ... --limit 3 --overwrite
+python DataLoaderDGS/Extractor.py --dataset_path ... --backend official
+```
+
+Das Standard-Backend `rtmlib` nutzt das installierte `rtmlib.Wholebody`
+(COCO-WholeBody, 133 Punkte) und braucht kein 3D-Lifting. `--backend official`
+schaltet auf `RTMPoseEstimator3D` um, das zusätzlich
+`pose_estimation_recognition_utils` voraussetzt. Beide Backends spiegeln x,
+drehen y nach oben und bauen z aus der 2D-Verkürzung neu auf; neu erzeugte
+Dateien haben also nicht mehr die unten beschriebene plattgedrückte Tiefe.
+`--device auto` nutzt CUDA, wenn onnxruntime es anbietet, `--front-sign -1`
+dreht die Arm-Tiefe.
+
+Ältere Dateien aus dem früheren Extractor wurden in 3D geliftet, aber
+`_denormalize_by_bounding_box` skaliert nur x und y zurück. Die z-Komponente
+bleibt im Normbereich des Lifters und ist damit rund 1000-mal zu klein
+(x/y ≈ 1e5, z ≈ 1e2). `Calculator.compute_final_rotations` liest die Punkte
+als Three.js-Koordinaten; mit konstantem z liegt jeder Knochen in der
+Bildebene und die Arme verschwinden im Rumpf. Ein Faktor hilft nicht, weil das
+geliftete z auch in der Richtung nicht stabil ist.
+
+`DataLoaderDGS/repair_pev.py` baut z deshalb aus der 2D-Verkürzung neu auf
+(`sqrt(L² - p²)` plus Grundtiefe nach vorn, dieselbe Idee wie
+`retarget/depth.py`). `x`/`y` und alle übrigen Felder bleiben unverändert,
+das Original wird als `*.pev.bak` gesichert. `--front-sign -1` dreht die
+Tiefe, falls die Arme nach hinten zeigen sollen. Das Retarget-Plugin braucht
+den Schritt nicht, weil es die Keypoints direkt aus dem Video liest.
+
+RTMLib/COCO-WholeBody-Keypoints steuern den Avatar ohne MediaPipe. Die
+Kette liegt in `retarget/`, Einzelheiten stehen in `retarget/README.md`.
+Ein Wort wie `Auto` wird über `plugins/gsg/wordlist.csv` gesucht; das
+zugehörige SignDict-Video wird geladen, mit RTMLib ausgewertet und
+abgespielt. Beide Arme folgen den Landmarks. Die Wiedergabe beginnt und
+endet in der T-Pose (Ruhepose des glTF); aus dem Video wird nur der
+Abschnitt mit erhobenen Händen verwendet. Die `.pev`-Dateien dienen nur
+noch als Notnagel, weil viele durch das 3D-Lifting unbrauchbar sind.
+Video- und Keypoint-Cache: `main/plugins/gsg/video_cache` (gitignoriert).
+
 --
 
 ##Contribution / Mitwirkung
