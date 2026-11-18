@@ -1,4 +1,8 @@
-"""Pruefungen fuer das Webviewer-Plugin (ohne laufenden WebSocket)."""
+"""Pruefungen fuer das Webviewer-Plugin (ohne laufenden WebSocket).
+
+Die Plugin-Tests benutzen ausschliesslich kuenstliche PEVs: zur Laufzeit
+duerfen keine Videos geladen und keine Keypoints berechnet werden.
+"""
 
 import importlib
 import json
@@ -8,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from fixtures import rtm_frames
+from fixtures import pev_frames, rtm_frames
 from retarget import rotations as rot
 from retarget.retarget import save_curves
 from retarget.rig import Rig
@@ -17,6 +21,10 @@ ROOT = Path(__file__).resolve().parents[2]
 MAIN = ROOT / "avatar-pose" / "main"
 RIG = ROOT / "retarget" / "data" / "rig_kim.json"
 GLB = ROOT / "avatar-pose" / "webviewer" / "media" / "avatar.glb"
+
+# 12 PEV-Frames bei 25 fps -> 14 Frames bei 30 fps, dazu je 10 T-Pose-Frames.
+GESTURE = 14 + 2 * 10
+PAUSE = int(round(0.2 * 30))
 
 
 class FakeSocket:
@@ -36,6 +44,17 @@ def plugin_class():
         sys.path.insert(0, str(MAIN))
     module = importlib.import_module("plugins.retarget.retarget")
     return module.retarget
+
+
+def fake_pev_dir(tmp_path, idents, frames=12):
+    """PEV-Dateien fuer die gegebenen Ids in einem temporaeren Ordner."""
+    target = tmp_path / "extracted"
+    target.mkdir(exist_ok=True)
+    data = {"fps": 25.0, "frames": pev_frames(frames)}
+    for ident in idents:
+        (target / ("%s.pev" % ident)).write_text(
+            json.dumps(data), encoding="utf-8")
+    return target
 
 
 def test_plugin_findet_rig_und_glb(plugin_class, monkeypatch):
@@ -80,65 +99,91 @@ def test_plugin_meldet_fehlende_datei_ohne_absturz(plugin_class, capsys):
     assert "Datei nicht gefunden" in out
 
 
-def test_plugin_spielt_wort_aus_der_gsg_liste(plugin_class, monkeypatch, tmp_path,
-                                              capsys):
+def test_plugin_spielt_wort_aus_der_gsg_liste(plugin_class, monkeypatch,
+                                               tmp_path, capsys):
     from plugins.retarget import retarget as plugin_module
-    from retarget import gsg_video, webviewer
+    from retarget import webviewer
 
-    if gsg_video.lookup(plugin_module.WORDLIST, "Auto") is None:
+    ident = plugin_class(FakeSocket())._wordlist().get("AUTO")
+    if ident is None:
         pytest.skip("gsg-Wortliste mit 'Auto' fehlt")
-    # Aufnahme aus dem Cache, damit der Test nicht ins Netz geht.
-    rec = {"width": 640, "height": 480, "fps": 30.0, "frame_step": 1,
-           "frames": rtm_frames(n=12)}
-    (tmp_path / "61.rtmlib.json").write_text(json.dumps(rec), encoding="utf-8")
-    monkeypatch.setenv("AVATAR_RETARGET_CACHE", str(tmp_path))
+    monkeypatch.setattr(plugin_module, "PEV_DIR",
+                        fake_pev_dir(tmp_path, [ident]))
 
     socket = FakeSocket()
     plugin = plugin_class(socket)
     plugin.input("Auto")
     capsys.readouterr()
     assert plugin._last_data is not None
-    # 12 Bilder + je 10 Frames T-Pose-Blende davor/dahinter
-    assert len(socket.frames) == 12 + 2 * 10
+    assert len(socket.frames) == GESTURE
     assert len(socket.frames[0]["upperarm_r"]["rotation"]) == 4
 
     # Anfang und Ende stehen in der T-Pose (Ruhepose des glTF).
     rest = webviewer.rest_frame(str(GLB), list(socket.frames[0]))
-    for frame in (socket.frames[-1],):
-        for name, value in rest.items():
-            q = np.asarray(frame[name]["rotation"], float)
-            r = np.asarray(value["rotation"], float)
-            # Quaternionen sind bis aufs Vorzeichen gleich; das GLB speichert
-            # in float32, daher die grosszuegige Toleranz.
-            assert min(np.abs(q - r).max(), np.abs(q + r).max()) < 1e-6
+    for name, value in rest.items():
+        q = np.asarray(socket.frames[-1][name]["rotation"], float)
+        r = np.asarray(value["rotation"], float)
+        # Quaternionen sind bis aufs Vorzeichen gleich; das GLB speichert
+        # in float32, daher die grosszuegige Toleranz.
+        assert min(np.abs(q - r).max(), np.abs(q + r).max()) < 1e-6
 
 
-def test_plugin_replay_befehl_wiederholt_das_letzte_wort(plugin_class, monkeypatch,
-                                                         tmp_path):
+def test_plugin_replay_befehl_wiederholt_das_letzte_wort(plugin_class,
+                                                         monkeypatch, tmp_path):
     from plugins.retarget import retarget as plugin_module
-    from retarget import gsg_video
 
-    if gsg_video.lookup(plugin_module.WORDLIST, "Auto") is None:
+    ident = plugin_class(FakeSocket())._wordlist().get("AUTO")
+    if ident is None:
         pytest.skip("gsg-Wortliste mit 'Auto' fehlt")
-    (tmp_path / "61.rtmlib.json").write_text(
-        json.dumps({"width": 640, "height": 480, "fps": 30.0,
-                    "frames": rtm_frames(n=12)}), encoding="utf-8")
-    monkeypatch.setenv("AVATAR_RETARGET_CACHE", str(tmp_path))
+    monkeypatch.setattr(plugin_module, "PEV_DIR",
+                        fake_pev_dir(tmp_path, [ident]))
 
     socket = FakeSocket()
     plugin = plugin_class(socket)
     plugin.input("Auto")
     first = len(socket.frames)
-    assert first == 12 + 2 * 10
+    assert first == GESTURE
     plugin.input("replay")
     assert len(socket.frames) == 2 * first
 
 
-def test_plugin_meldet_unbekanntes_wort(plugin_class, capsys):
-    plugin = plugin_class(FakeSocket())
-    plugin.input("gibt-es-nicht-als-wort")
+def test_plugin_buchstabiert_unbekanntes_wort(plugin_class, monkeypatch,
+                                               tmp_path, capsys):
+    from plugins.retarget import retarget as plugin_module
+
+    words = plugin_class(FakeSocket())._wordlist()
+    if "QUX" in words or not all(char in words for char in "QUX"):
+        pytest.skip("Buchstaben Q/U/X oder 'Qux' in der Wortliste vorhanden")
+    monkeypatch.setattr(plugin_module, "PEV_DIR",
+                        fake_pev_dir(tmp_path, [words[c] for c in "QUX"]))
+
+    socket = FakeSocket()
+    plugin = plugin_class(socket)
+    plugin.input("Qux")
     out = capsys.readouterr().out
-    assert "Datei nicht gefunden" in out
+    assert "Buchstabieren: Q U X" in out
+    assert len(socket.frames) == 3 * GESTURE + 2 * PAUSE
+
+
+def test_plugin_buchstabiert_wenn_pev_fehlt(plugin_class, monkeypatch,
+                                             tmp_path, capsys):
+    """Fehlt die Gebaerden-PEV, wird das Wort Buchstabe fuer Buchstabe gespielt."""
+    from plugins.retarget import retarget as plugin_module
+
+    words = plugin_class(FakeSocket())._wordlist()
+    letters = "AUTO"
+    if not all(char in words for char in letters):
+        pytest.skip("Einzelbuchstaben fehlen in der Wortliste")
+    # Bewusst keine PEV fuer 'AUTO' (id 61) anlegen.
+    monkeypatch.setattr(plugin_module, "PEV_DIR",
+                        fake_pev_dir(tmp_path, [words[c] for c in letters]))
+
+    socket = FakeSocket()
+    plugin = plugin_class(socket)
+    plugin.input("Auto")
+    out = capsys.readouterr().out
+    assert "Buchstabieren: A U T O" in out
+    assert len(socket.frames) == 4 * GESTURE + 3 * PAUSE
 
 
 def test_plugin_ignoriert_auto_als_standardpfad(plugin_class, monkeypatch, capsys):
@@ -156,3 +201,93 @@ def test_plugin_ohne_standarddatei_zeigt_hilfe(plugin_class, monkeypatch, capsys
     plugin = plugin_class(FakeSocket())
     plugin.input("")
     assert "replay" in capsys.readouterr().out
+
+
+def test_plugin_mehrwort_eintrag_hat_vorrang(plugin_class, monkeypatch,
+                                              tmp_path, capsys):
+    from plugins.retarget import retarget as plugin_module
+
+    ident = plugin_class(FakeSocket())._wordlist().get("AUTO FAHREN")
+    if ident is None:
+        pytest.skip("Mehrwort-Eintrag 'Auto fahren' fehlt")
+    monkeypatch.setattr(plugin_module, "PEV_DIR",
+                        fake_pev_dir(tmp_path, [ident]))
+    monkeypatch.setenv("AVATAR_GLOSS", "0")
+
+    socket = FakeSocket()
+    plugin = plugin_class(socket)
+    plugin.input("Auto fahren")
+    out = capsys.readouterr().out
+    assert "Satz" not in out
+    assert plugin._last_data is not None
+    assert len(socket.frames) == GESTURE
+
+
+def test_plugin_spielt_satz_aus_mehreren_woertern(plugin_class, monkeypatch,
+                                                   tmp_path, capsys):
+    from plugins.retarget import retarget as plugin_module
+
+    words = plugin_class(FakeSocket())._wordlist()
+    if not all(key in words for key in ("AUTO", "HUND")):
+        pytest.skip("gsg-Wortliste ohne Auto/Hund")
+    idents = [words["AUTO"], words["HUND"]]
+    monkeypatch.setattr(plugin_module, "PEV_DIR",
+                        fake_pev_dir(tmp_path, idents))
+    monkeypatch.setenv("AVATAR_GLOSS", "0")
+
+    socket = FakeSocket()
+    plugin = plugin_class(socket)
+    plugin.input("Auto Hund")
+    out = capsys.readouterr().out
+    assert "Satz" in out and "(words)" in out
+    assert len(socket.frames) == 2 * GESTURE + PAUSE
+
+    played = len(socket.frames)
+    plugin.input("replay")
+    assert len(socket.frames) == 2 * played
+
+
+def test_plugin_buchstabiert_unbekanntes_wort_trotz_gloss(plugin_class,
+                                                           monkeypatch,
+                                                           tmp_path, capsys):
+    """Ein unbekanntes Wort darf nicht durch die Gloss-Uebersetzung entfallen."""
+    from plugins.retarget import retarget as plugin_module
+
+    words = plugin_class(FakeSocket())._wordlist()
+    if "QUX" in words or not all(char in words for char in "QUX"):
+        pytest.skip("Buchstaben Q/U/X oder 'Qux' in der Wortliste vorhanden")
+    monkeypatch.setattr(
+        plugin_module, "PEV_DIR",
+        fake_pev_dir(tmp_path, [words["AUTO"]] + [words[c] for c in "QUX"]))
+
+    socket = FakeSocket()
+    plugin = plugin_class(socket)
+    # Das Modell wuerde 'Auto Qux' auf 'AUTO' reduzieren; das ist nicht
+    # zulaessig, solange 'Qux' unbekannt ist.
+    monkeypatch.setattr(plugin, "_gloss", lambda text, tokens: ["AUTO"])
+    plugin.input("Auto Qux")
+    out = capsys.readouterr().out
+    assert "unbekannt: QUX" in out
+    assert "(words)" in out
+    assert "AUTO Q U X" in out
+    # AUTO + drei Buchstaben, dazwischen jeweils eine Ruhepose-Pause.
+    assert len(socket.frames) == 4 * GESTURE + 3 * PAUSE
+
+
+def test_plugin_spielt_buchstabenfolge(plugin_class, monkeypatch, tmp_path,
+                                        capsys):
+    from plugins.retarget import retarget as plugin_module
+
+    words = plugin_class(FakeSocket())._wordlist()
+    if not all(char in words for char in "HAUS"):
+        pytest.skip("Einzelbuchstaben fehlen in der Wortliste")
+    monkeypatch.setattr(plugin_module, "PEV_DIR",
+                        fake_pev_dir(tmp_path, [words[c] for c in "HAUS"]))
+    monkeypatch.setenv("AVATAR_GLOSS", "0")
+
+    socket = FakeSocket()
+    plugin = plugin_class(socket)
+    plugin.input("H A U S")
+    out = capsys.readouterr().out
+    assert "Satz" in out and "(letters)" in out
+    assert len(socket.frames) == 4 * GESTURE + 3 * PAUSE

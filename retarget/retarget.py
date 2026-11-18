@@ -121,12 +121,13 @@ def head_rotation_series(frames, W, H, depth, fps, spine_damp, min_conf, window,
 
 
 def arm_mode_for(seq, arm_mode=None):
-    """Loest "auto" auf: .pev nur mit dem Gebaerdearm, sonst beide Arme."""
+    """Loest "auto" auf: seit den neu erzeugten ``.pev``-Dateien folgen beide
+    Arme den Landmarks. ``sign`` bleibt als explizite Option erhalten."""
     mode = (arm_mode or ARM_MODE or "auto").strip().lower()
     if mode not in ("both", "sign", "auto"):
         mode = "auto"
     if mode == "auto":
-        return "sign" if seq.get("source") == "pev" else "both"
+        return "both"
     return mode
 
 

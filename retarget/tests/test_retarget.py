@@ -181,13 +181,23 @@ def _sign_sequence():
     return seq
 
 
-def test_pev_modus_haelt_zweiten_arm_entspannt():
+def test_sign_modus_haelt_zweiten_arm_entspannt():
     rig = Rig(toy_rig()["bones"], "toy")
     seq = _sign_sequence()
-    assert retarget.arm_mode_for(seq) == "sign"
+    # "auto" laesst inzwischen beide Arme folgen (neue PEVs mit korrekter
+    # 2D-Pose); der entspannte Arm ist nur noch explizit erzwingbar.
+    assert retarget.arm_mode_for(seq) == "both"
+    assert retarget.arm_mode_for(seq, "sign") == "sign"
     assert retarget.arm_mode_for(Sequence(toy_sequence())) == "both"
 
-    curves = retarget.solve(rig, seq)
+    # Standard: beide Arme kommen aus den Landmarks (der linke Arm des
+    # Spielzeug-Skeletts haengt gerade herab, nicht in der entspannten Haltung).
+    curves_both = retarget.solve(rig, seq)
+    got_l = rig.direction(curves_both, "upperarm_l", 0)
+    relaxed_l = rot.unit(RELAXED_ARM_UP["l"])
+    assert float(np.dot(rot.unit(got_l), relaxed_l)) < math.cos(math.radians(5.0))
+
+    curves = retarget.solve(rig, seq, arm_mode="sign")
     want = rot.unit(RELAXED_ARM_UP["l"])
     for i in (0, 10, 20, 30, 39):
         got = rig.direction(curves, "upperarm_l", i)

@@ -1,9 +1,9 @@
 """Echte gsg-Videos laden und mit RTMLib auswerten.
 
-Die ``.pev``-Dateien aus ``plugins/gsg/extracted_videos`` stammen aus einem
-3D-Lifting-Modell und sind fuer viele Woerter unbrauchbar: die linke Armkette
-liegt weit ausserhalb des Koerpers, die Konfidenzen sind alle 1.0. Fuer den
-Avatar werden die Keypoints deshalb direkt aus dem Video gewonnen.
+Die ``.pev``-Dateien aus ``plugins/gsg/extracted_videos`` sind der Fallback,
+wenn das Video fehlt; mit ``DataLoaderDGS/Extractor.py`` neu erzeugt, enthalten
+sie dieselbe 2D-Pose wie der Videopfad (frueher: 3D-Lifting mit kaputter
+linker Armkette).
 
 Ablauf je Wort:
 
@@ -13,6 +13,12 @@ Ablauf je Wort:
 * alle Frames mit ``rtmlib.Wholebody`` (COCO-WholeBody, 133 Punkte) auswerten,
 * Keypoints als JSON neben dem Video ablegen und beim naechsten Mal direkt
   laden (kein erneuter Download, keine erneute Inferenz).
+
+RTMLib laeuft standardmaessig ueber sein OpenCV-DNN-Backend
+(``AVATAR_RTMLIB_BACKEND=opencv``); damit wird das Paket ``onnxruntime``
+nicht gebraucht. Die Gewichte selbst sind bei RTMLib immer ``.onnx``-Dateien.
+``AVATAR_RTMLIB_BACKEND=onnxruntime`` schaltet die alte Engine wieder ein,
+``AVATAR_RTMLIB_DEVICE`` setzt das Geraet (Standard ``cpu``).
 
 Der Cache liegt unter ``main/plugins/gsg/video_cache`` und ist in
 ``.gitignore`` eingetragen.
@@ -48,6 +54,24 @@ def lookup(wordlist, word):
             if _norm(row.get("text")) == key:
                 return row
     return None
+
+
+def row_by_id(wordlist, ident):
+    """Zeile der ``wordlist.csv`` fuer eine Id (oder ``None``)."""
+    key = str(ident or "").strip()
+    if not key:
+        return None
+    with open(wordlist, newline="", encoding="utf-8-sig", errors="replace") as f:
+        for row in csv.DictReader(f):
+            if (row.get("id") or "").strip() == key:
+                return row
+    return None
+
+
+def cache_path(cache_dir, ident):
+    """Pfad der RTMLib-Keypoints im Cache (ohne Download/Inferenz)."""
+    slug = re.sub(r"[^0-9A-Za-z_.-]", "_", str(ident))
+    return Path(cache_dir) / ("%s.rtmlib.json" % slug)
 
 
 def video_urls(row):
@@ -104,14 +128,57 @@ def fetch_video(row, dest, ident=None):
                         % (row.get("text"), "\n  ".join(errors)))
 
 
-def extract_keypoints(video_path, out_path=None):
-    """Alle Frames mit RTMLib (COCO-WholeBody) auswerten."""
+def rtmlib_backend(default="opencv"):
+    """Backend fuer ``rtmlib.Wholebody`` (``opencv`` braucht kein onnxruntime)."""
+    value = (os.environ.get("AVATAR_RTMLIB_BACKEND") or default or "opencv")
+    value = value.strip().lower()
+    return value if value in ("opencv", "onnxruntime", "openvino") else "opencv"
+
+
+def rtmlib_device(default="cpu"):
+    return ((os.environ.get("AVATAR_RTMLIB_DEVICE") or default or "cpu")
+            .strip().lower())
+
+
+def make_wholebody(backend=None, device=None, mode=None):
+    """RTMLib-Modell laden; ohne ``onnxruntime``-Zwang.
+
+    Faellt auf ``onnxruntime`` zurueck, wenn OpenCV das Modell nicht laden
+    kann (z. B. aeltere OpenCV-Version) und das Paket installiert ist.
+    """
     try:
-        import cv2
         from rtmlib import Wholebody
     except ImportError as exc:                         # noqa: BLE001
         raise GsgVideoError(
             "RTMLib fehlt (pip install rtmlib opencv-python-headless): %s" % exc)
+
+    backend = backend or rtmlib_backend()
+    device = device or rtmlib_device()
+    kwargs = {"to_openpose": False, "backend": backend, "device": device}
+    if mode:
+        kwargs["mode"] = mode
+    try:
+        return Wholebody(**kwargs)
+    except Exception as exc:                           # noqa: BLE001
+        if backend != "opencv":
+            raise GsgVideoError("RTMLib laedt nicht (%s): %s" % (backend, exc))
+        print("[retarget] OpenCV-Backend nicht nutzbar (%s) - versuche "
+              "onnxruntime" % exc)
+        kwargs["backend"] = "onnxruntime"
+        try:
+            return Wholebody(**kwargs)
+        except Exception as exc2:                      # noqa: BLE001
+            raise GsgVideoError(
+                "RTMLib laedt weder mit OpenCV noch mit onnxruntime: %s" % exc2)
+
+
+def extract_keypoints(video_path, out_path=None, backend=None, device=None):
+    """Alle Frames mit RTMLib (COCO-WholeBody) auswerten."""
+    try:
+        import cv2
+    except ImportError as exc:                         # noqa: BLE001
+        raise GsgVideoError(
+            "OpenCV fehlt (pip install opencv-python-headless): %s" % exc)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -119,7 +186,7 @@ def extract_keypoints(video_path, out_path=None):
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0
-    model = Wholebody(to_openpose=False, backend="onnxruntime", device="cpu")
+    model = make_wholebody(backend=backend, device=device)
 
     frames = []
     while True:
@@ -155,10 +222,22 @@ def recording(wordlist, word, cache_dir, ident=None):
     row = lookup(wordlist, word)
     if row is None:
         raise GsgVideoError("Wort '%s' steht nicht in %s" % (word, wordlist))
-    ident = str(ident if ident is not None else row.get("id", "")).strip()
-    slug = re.sub(r"[^0-9A-Za-z_.-]", "_", ident or word)
+    return _recording(row, cache_dir,
+                      ident if ident is not None else row.get("id", ""))
+
+
+def recording_by_id(wordlist, ident, cache_dir):
+    """Wie :func:`recording`, aber die Id ist bereits bekannt (Satzplanung)."""
+    row = row_by_id(wordlist, ident)
+    if row is None:
+        raise GsgVideoError("Id '%s' steht nicht in %s" % (ident, wordlist))
+    return _recording(row, cache_dir, ident)
+
+
+def _recording(row, cache_dir, ident):
+    slug = re.sub(r"[^0-9A-Za-z_.-]", "_", str(ident or row.get("text", "")))
     cache_dir = Path(cache_dir)
-    keypoints = cache_dir / ("%s.rtmlib.json" % slug)
+    keypoints = cache_path(cache_dir, ident or slug)
     if keypoints.exists():
         with open(keypoints, "r", encoding="utf-8") as f:
             return json.load(f)

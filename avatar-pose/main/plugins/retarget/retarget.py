@@ -23,20 +23,36 @@ Im Textfeld des Webviewers:
     <Enter>              Standarddatei abspielen (oder letzte wiederholen)
     replay / play        letzte Datei erneut abspielen
     <wort>               Wort aus plugins/gsg/wordlist.csv nachschlagen und
-                         die Pose aus dem echten Video ableiten (z. B. "Auto")
+                         die vorab extrahierte PEV abspielen (z. B. "Auto")
+    <satz>               mehrere Woerter/Buchstaben, z. B. "Der Hund laeuft"
+                         oder "H A U S"; siehe unten
     <pfad>               Kurven-JSON abspielen
     <pfad-zu-rtmlib>     RTMLib-JSON durch die ganze Kette schicken
 
 Die Wortsuche ist nicht Gross-/Kleinschreibung-abhaengig. "Auto" findet in
-der wordlist.csv die id 61, laedt das zugehoerige Video (SignDict-CDNs),
-wertet es mit RTMLib aus und legt die Keypoints als Cache ab. Die
-``.pev``-Dateien aus ``extracted_videos`` sind nur noch der Notnagel: sie
-stammen aus einem 3D-Lifting-Modell und sind fuer viele Woerter kaputt.
+der wordlist.csv die id 61; gespielt wird ausschliesslich
+``extracted_videos/61.pev``. Diese Dateien werden vorab mit
+``DataLoaderDGS/Extractor.py`` aus den zugeschnittenen gsg-Videos erzeugt;
+zur Laufzeit werden weder Videos geladen noch Keypoints berechnet und es wird
+nicht auf Signdict zugegriffen. Fehlt ein Wort als Gebaerde (oder die PEV),
+wird es wie in ``gsg.py`` Buchstabe fuer Buchstabe gespielt (``SCH`` zusammen).
 
-Die Wortwiedergabe beginnt und endet in der T-Pose (Ruhepose des glTF): Aus
-dem Video wird der Abschnitt genommen, in dem die Haende oben sind, davor und
-dahinter blendet ``webviewer.anchor_rest`` aus der T-Pose hinein und zurueck.
-Mit ``AVATAR_RETARGET_ANCHOR=none`` laesst sich die Blende abschalten.
+Mehrere Woerter werden ueber ``text_to_gloss`` (Deutsch -> DGS-Gloss)
+uebersetzt und dann Wort fuer Wort abgespielt; unbekannte Woerter werden
+buchstabiert. Das Modell ist auf Wettertexten trainiert, deshalb bleibt die
+Wortliste der Rueckfall. Ein einzelnes Wort, das in der Wortliste steht,
+geht weiterhin direkt durch (kein Modell). Ein-Blendungen zur T-Pose und eine
+kurze Pause trennen die Gebaerden. Abschalten mit ``AVATAR_GLOSS=0``.
+
+    AVATAR_GLOSS_EPOCH   Standard 20 (bester BLEU auf data/test.txt)
+    AVATAR_GLOSS_DIR     Ordner von text_to_gloss
+    AVATAR_RETARGET_SIGN_PAUSE  Pause zwischen Gebaerden in Sekunden (0.2)
+
+Die zugeschnittenen PEVs enthalten bereits die ganze Gebaerde, deshalb werden
+sie ohne weiteres Bewegungsfenster abgespielt. Die Wiedergabe beginnt und
+endet in der T-Pose (Ruhepose des glTF): davor und dahinter blendet
+``webviewer.anchor_rest`` hinein und zurueck. Mit
+``AVATAR_RETARGET_ANCHOR=none`` laesst sich die Blende abschalten.
 
 Wichtig: ``AVATAR_RETARGET_CURVES`` ist ein Dateipfad, kein Schalter. Der
 Wert ``auto`` wird deshalb verworfen und mit einem Hinweis gemeldet.
@@ -44,20 +60,15 @@ Wert ``auto`` wird deshalb verworfen und mit einem Hinweis gemeldet.
 Die PEV-Dateien der gsg-Videos sind gespiegelt (y zeigt nach oben). Der
 Adapter dreht das zurueck und tauscht links/rechts; mit
 ``AVATAR_RETARGET_PEV_SWAP=0`` laesst sich der Tausch abschalten.
-Bei ``.pev`` folgt nur der Gebaerdearm den Landmarks, weil der zweite Arm in
-den Aufnahmen oft verdeckt und stark verkuerzt ist. Der andere Arm haengt
-entspannt herab. ``AVATAR_RETARGET_ARM_MODE=both`` schaltet wieder beide Arme
-ein, ``=sign`` erzwingt den Gebaerdearm auch fuer andere Quellen.
-
-Der Video-Cache liegt unter ``main/plugins/gsg/video_cache`` (gitignoriert).
-Mit ``AVATAR_RETARGET_CACHE`` laesst sich ein anderer Ordner setzen.
+Seit der Neuerzeugung mit ``DataLoaderDGS/Extractor.py`` folgen bei ``.pev``
+beide Arme den Landmarks (``auto`` = ``both``). ``AVATAR_RETARGET_ARM_MODE=sign``
+laesst weiterhin nur den Gebaerdearm folgen, der andere haengt entspannt herab.
 
 Der WebSocket-Puffer existiert erst nach dem Konstruktor des Plugins,
 deshalb startet die Wiedergabe mit der ersten Eingabe und nicht schon beim
 Serverstart.
 """
 
-import csv
 import json
 import os
 import sys
@@ -74,14 +85,14 @@ if str(PROJECT_DIR) not in sys.path:
 
 DEFAULT_RIG = PROJECT_DIR / "retarget" / "data" / "rig_kim.json"
 DEFAULT_GLB = APP_DIR / "webviewer" / "media" / "avatar.glb"
+# Uebersetzungsmodul (Deutsch -> DGS-Gloss) mit den vorhandenen Checkpoints.
+GLOSS_DIR = APP_DIR / "text_to_gloss"
+DEFAULT_GLOSS_EPOCH = 20
 
 # Wortliste und bereits extrahierte Posen aus dem gsg-Plugin.
 GSG_DIR = APP_DIR / "main" / "plugins" / "gsg"
 WORDLIST = GSG_DIR / "wordlist.csv"
 PEV_DIR = GSG_DIR / "extracted_videos"
-# Videos + RTMLib-Keypoints der Woerter (gitignoriert).
-CACHE_DIR = GSG_DIR / "video_cache"
-
 # Der Server sendet mit fester Rate; die Kurven werden darauf umgerechnet.
 PLAYBACK_FPS = 30.0
 # Diese Eingaben sind Befehle, keine Dateinamen. "auto" ist bewusst *kein*
@@ -89,10 +100,13 @@ PLAYBACK_FPS = 30.0
 REPLAY_COMMANDS = ("", "replay", "play", "start")
 # Nur fuer AVATAR_RETARGET_CURVES: dieser Wert ist kein Pfad.
 NOT_A_PATH = REPLAY_COMMANDS + ("auto",)
-HELP = ("[retarget] <Enter>/replay spielt die Standarddatei, ein Wort wie "
-        "'Auto' wird in plugins/gsg/wordlist.csv gesucht. Sonst den Pfad zu "
-        "einer Kurven-, RTMLib- oder PEV-JSON eingeben. "
-        "AVATAR_RETARGET_CURVES muss auf eine Datei zeigen.")
+HELP = ("[retarget] <Enter>/replay wiederholt die letzte Ausgabe. Ein Wort wie "
+        "'Auto' wird in plugins/gsg/wordlist.csv gesucht und die PEV aus "
+        "extracted_videos gespielt; fehlt sie, wird Buchstabe fuer Buchstabe "
+        "gespielt. Mehrere Woerter wie 'Der Hund laeuft' werden uebersetzt und "
+        "Gebaerden einzeln gespielt. Sonst den Pfad zu einer Kurven-, RTMLib- "
+        "oder PEV-JSON eingeben. AVATAR_RETARGET_CURVES muss auf eine Datei "
+        "zeigen.")
 
 
 def _resolve(path):
@@ -109,10 +123,23 @@ def _looks_like_curves(data):
     return isinstance(data, dict) and isinstance(data.get("bones"), dict)
 
 
+def _env_float(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        print("[retarget] %s ist keine Zahl - nutze %s" % (name, default))
+        return float(default)
+
+
 def _looks_like_sequence(data):
     frames = data.get("frames") if isinstance(data, dict) else None
     return isinstance(frames, list) and any(
         isinstance(fd, dict) and fd.get("pose") is not None for fd in frames)
+
+
+def _looks_like_path(text):
+    """Dateinamen auch dann als Pfad melden, wenn sie nicht existieren."""
+    return Path(text).suffix.lower() in (".json", ".pev")
 
 
 class retarget(LangPlugin):
@@ -131,17 +158,23 @@ class retarget(LangPlugin):
             self.default_path = None
         self.pev_swap = (os.environ.get("AVATAR_RETARGET_PEV_SWAP", "1")
                          .strip().lower() not in ("0", "false", "no", "off"))
-        # "auto" (nur Gebaerdearm bei .pev), "sign" oder "both".
+        # "auto" = beide Arme; "sign" erzwingt den entspannten zweiten Arm.
         self.arm_mode = (os.environ.get("AVATAR_RETARGET_ARM_MODE", "auto")
                          .strip().lower())
-        self.cache_dir = _resolve(os.environ.get("AVATAR_RETARGET_CACHE", CACHE_DIR))
         # Wortwiedergabe beginnt/endet in der T-Pose (Ruhepose).
         self.anchor = (os.environ.get("AVATAR_RETARGET_ANCHOR", "rest")
                        .strip().lower() not in ("0", "none", "off", "false", "no"))
+        # Satz-Eingabe: Uebersetzung und Pause zwischen den Gebaerden.
+        self.gloss_dir = _resolve(os.environ.get("AVATAR_GLOSS_DIR", GLOSS_DIR))
+        self.gloss_epoch = int(_env_float("AVATAR_GLOSS_EPOCH",
+                                          DEFAULT_GLOSS_EPOCH))
+        self.sign_pause = max(0.0, _env_float("AVATAR_RETARGET_SIGN_PAUSE", 0.2))
         self._rig = None
         self._last_path = None
         self._last_data = None
         self._last_label = None
+        self._last_sentence = None
+        self._frame_cache = {}
         self._words = None
 
     # ------------------------------------------------------------------ API
@@ -154,19 +187,37 @@ class retarget(LangPlugin):
                 if self._last_data is not None:
                     self._play_data(self._last_data, self._last_label)
                     return
+                if self._last_sentence is not None:
+                    self._play_sentence(self._last_sentence)
+                    return
                 target = self._last_path or self.default_path
                 if not target:
                     print(HELP)
                     return
-            elif not _resolve(command).exists():
-                # Kein existierender Pfad? Dann als Wort in der gsg-Liste suchen.
-                data = self._word_recording(command)
-                if data is not None:
-                    self._play_data(data, command)
+            elif not (_looks_like_path(command) or _resolve(command).exists()):
+                from retarget import sentence as sentence_mod
+                tokens = sentence_mod.split_tokens(command)
+                # Ein Mehrwort-Eintrag der Wortliste ("Auto fahren") hat
+                # Vorrang; mehrere freie Woerter werden als Satz geplant.
+                # "H A U S" ist dagegen eine Buchstabenfolge, kein Eintrag.
+                if (len(tokens) > 1
+                        and sentence_mod.normalize(command)
+                        not in self._wordlist()):
+                    # Gloss -> Wortliste -> Buchstaben.
+                    self._play_sentence(command)
                     return
-                target = self._word_pev(command)
-                if target is None:
-                    target = command
+                signs = self._signs_for_text(command)
+                if not signs:
+                    raise ValueError(
+                        "'%s': kein Gebaerden-Eintrag und keine Buchstaben in "
+                        "plugins/gsg/wordlist.csv" % command)
+                if len(signs) == 1 and not signs[0].spelled:
+                    self._play_data(self._load_pev(signs[0].ident), command)
+                else:
+                    label = " ".join(sign.label for sign in signs)
+                    self._play_signs(signs, command,
+                                     "Buchstabieren: " + label)
+                return
             else:
                 target = command
             self._play(target)
@@ -178,52 +229,165 @@ class retarget(LangPlugin):
     def _wordlist(self):
         """text (gross) -> id aus plugins/gsg/wordlist.csv, einmal geladen."""
         if self._words is None:
-            words = {}
+            from retarget import sentence as sentence_mod
             if WORDLIST.exists():
-                with open(WORDLIST, newline="", encoding="utf-8-sig",
-                          errors="replace") as f:
-                    for row in csv.DictReader(f):
-                        text = " ".join((row.get("text") or "").split()).upper()
-                        ident = (row.get("id") or "").strip()
-                        if text and ident:
-                            words.setdefault(text, ident)
+                self._words = sentence_mod.load_wordlist(WORDLIST)
             else:
                 print("[retarget] Wortliste fehlt: %s" % WORDLIST)
-            self._words = words
+                self._words = {}
         return self._words
 
-    def _word_pev(self, text):
-        """Pfad zur .pev-Datei fuer ein Wort aus der gsg-Wortliste."""
-        key = " ".join((text or "").split()).upper()
-        if not key:
-            return None
-        ident = self._wordlist().get(key)
-        if ident is None:
-            return None
-        path = PEV_DIR / ("%s.pev" % ident)
-        if not path.exists():
-            raise FileNotFoundError(
-                "Wort '%s' gefunden (id %s), aber die PEV-Datei fehlt: %s"
-                % (text, ident, path))
-        return path
+    @staticmethod
+    def _pev_path(ident):
+        """Pfad der vorab extrahierten PEV zu einer Wortlisten-Id."""
+        return PEV_DIR / ("%s.pev" % str(ident).strip())
 
-    def _word_recording(self, text):
-        """Keypoints aus dem echten Video eines Wortes - oder ``None``."""
+    def _load_pev(self, ident):
+        path = self._pev_path(ident)
+        if not path.exists():
+            raise FileNotFoundError("PEV fehlt: %s" % path)
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _signs_for_text(self, text):
+        """Ein Wort (oder eine Buchstabenfolge) -> Zeichen mit PEV.
+
+        Fehlt die Gebaerde oder die PEV-Datei, wird wie in ``gsg.py``
+        Buchstabe fuer Buchstabe gespielt.
+        """
+        from retarget import sentence as sentence_mod
+        words = self._wordlist()
+        key = sentence_mod.normalize(text)
+        ident = words.get(key)
+        if ident is not None and self._pev_path(ident).exists():
+            return [sentence_mod.Sign(key, ident)]
+        return [sign for sign in sentence_mod.spell_word(key, words)
+                if self._pev_path(sign.ident).exists()]
+
+    def _play_signs(self, signs, text, announce):
+        """Mehrere Zeichen mit Ruhepose-Pause an den WebSocket schicken."""
+        frames = self._sentence_frames(signs)
+        self._send(frames, announce)
+        self._last_sentence = text
+        self._last_data = None
+        self._last_path = None
+        self._last_label = None
+
+    def _play_sentence(self, text):
+        """Mehrere Woerter/Buchstaben: Gloss -> Wortliste -> Buchstabieren.
+
+        Jedes Zeichen muss eine PEV haben; fehlt sie, wird das Wort
+        buchstabiert. Ist ein eingegebenes Wort unbekannt (kein Eintrag oder
+        keine PEV), darf die Gloss-Uebersetzung es nicht ersetzen: dann werden
+        die eingegebenen Woerter benutzt und das unbekannte Wort buchstabiert.
+        Damit kommt zur Laufzeit ausschliesslich die Extraktion aus
+        ``DataLoaderDGS/Extractor.py`` zum Einsatz.
+        """
+        from retarget import sentence as sentence_mod
+
+        tokens = sentence_mod.split_tokens(text)
+        words = self._wordlist()
+        missing = []
+        for token in tokens:
+            key = sentence_mod.normalize(token)
+            ident = words.get(key)
+            if ident is None or not self._pev_path(ident).exists():
+                missing.append(key)
+        if missing:
+            print("[retarget] unbekannt: %s - buchstabiere; Gloss wird "
+                  "nicht genutzt" % ", ".join(missing))
+            gloss_words = None
+        else:
+            gloss_words = self._gloss(text, tokens)
+        plan = sentence_mod.plan(tokens, words, gloss=gloss_words)
+
+        signs = []
+        skipped = list(plan.skipped)
+        for sign in plan.signs:
+            if self._pev_path(sign.ident).exists():
+                signs.append(sign)
+                continue
+            spelled = [item for item in sentence_mod.spell_word(sign.label, words)
+                       if self._pev_path(item.ident).exists()]
+            if spelled:
+                print("[retarget] '%s' (id %s) ohne PEV - buchstabiere %s"
+                      % (sign.label, sign.ident,
+                         " ".join(item.label for item in spelled)))
+                signs.extend(spelled)
+            else:
+                skipped.append(sign.label)
+        if not signs:
+            raise ValueError(
+                "Satz '%s': kein Wort aus plugins/gsg/wordlist.csv abbildbar"
+                % text)
+
+        label = " ".join(sign.label for sign in signs)
+        print("[retarget] Satz '%s' -> %s (%s)"
+              % (text, label, plan.source))
+        if skipped:
+            print("[retarget] nicht abbildbar: %s" % ", ".join(skipped))
+        self._play_signs(signs, text, "Satz: " + label)
+
+    def _gloss(self, text, tokens):
+        """Gloss-Reihenfolge vom Uebersetzungsmodul (oder ``None``)."""
+        from retarget import sentence as sentence_mod
+        if sentence_mod.is_letter_sequence(tokens):
+            return None                         # "H A U S" nicht uebersetzen
         try:
-            from retarget import gsg_video
+            from retarget import gloss
         except Exception as exc:                          # noqa: BLE001
-            print("[retarget] Video-Modul nicht ladbar (%s) - nutze PEV" % exc)
+            print("[retarget] Uebersetzungsmodul nicht ladbar (%s)" % exc)
             return None
-        if gsg_video.lookup(WORDLIST, text) is None:
+        translator = gloss.get_translator(self.gloss_dir, self.gloss_epoch)
+        if translator is None:
             return None
-        print("[retarget] werte Video fuer '%s' aus (nur beim ersten Mal "
-              "langsam) ..." % text)
         try:
-            return gsg_video.recording(WORDLIST, text, self.cache_dir)
+            words = translator.translate(text)
         except Exception as exc:                          # noqa: BLE001
-            print("[retarget] Video fuer '%s' nicht nutzbar (%s) - nutze PEV"
-                  % (text, exc))
+            print("[retarget] Uebersetzung fehlgeschlagen (%s)" % exc)
             return None
+        if words:
+            print("[retarget] Gloss: %s" % " ".join(w.upper() for w in words))
+        return words or None
+
+    def _frames_for_id(self, sign):
+        """Frames einer Gebaerden-Einheit aus der PEV, mit Cache pro Id."""
+        ident = str(sign.ident)
+        if ident in self._frame_cache:
+            return self._frame_cache[ident]
+
+        path = self._pev_path(ident)
+        if not path.exists():
+            raise FileNotFoundError("PEV fehlt: %s" % path)
+        with open(path, "r", encoding="utf-8") as f:
+            frames = self._frames_from_recording(json.load(f), anchor=True)
+        if not frames:
+            raise ValueError("keine Frames aus %s" % path)
+        if len(self._frame_cache) < 128:
+            self._frame_cache[ident] = frames
+        return frames
+
+    def _sentence_frames(self, signs):
+        """Frames aller Zeichen mit T-Pose-Pause dazwischen verketten."""
+        from retarget import webviewer
+
+        segments = []
+        for sign in signs:
+            frames = self._frames_for_id(sign)
+            if frames:
+                segments.append(frames)
+        if not segments:
+            return []
+
+        names = sorted({name for segment in segments for name in segment[0]})
+        rest = webviewer.rest_frame(str(self.glb_path), names)
+        pause = int(round(self.sign_pause * PLAYBACK_FPS))
+        out = []
+        for segment in segments:
+            if out and pause > 0:
+                out.extend(rest for _ in range(pause))
+            out.extend(segment)
+        return out
 
     def _rig_data(self):
         if self._rig is None:
@@ -236,14 +400,18 @@ class retarget(LangPlugin):
         curves = webviewer.resample(curves, fps, PLAYBACK_FPS)
         return webviewer.frames(self._rig_data(), curves, str(self.glb_path))
 
-    def _frames_from_recording(self, data, gesture=False):
-        """RTMLib-, PEV- oder Landmark-Aufnahme einmal durch die ganze Kette."""
+    def _frames_from_recording(self, data, anchor=False):
+        """Aufnahme einmal durch die ganze Kette.
+
+        Die PEVs sind bereits auf die Gebaerde zugeschnitten; es gibt kein
+        zusaetzliches Bewegungsfenster mehr. ``anchor`` blendet Anfang und
+        Ende aus der T-Pose (nur fuer Wort-/Satzwiedergabe).
+        """
         from retarget import landmarks, webviewer
         from retarget import retarget as pipeline
         from retarget.rtm_adapter import (looks_like_pev, sequence_from_pev,
                                           sequence_from_rtmlib)
         from retarget.sequence import Sequence
-        from retarget.window import raised_arms_window
 
         if looks_like_pev(data):
             seq = sequence_from_pev(data, swap_sides=self.pev_swap)
@@ -256,19 +424,9 @@ class retarget(LangPlugin):
         if not curves:
             raise ValueError("kein Knochen gesetzt - Konfidenz oder Rig pruefen")
 
-        if gesture:
-            win = raised_arms_window(seq)
-            if win is not None:
-                # Nur der Abschnitt mit erhobenen Haenden; Anfang und Ende
-                # werden spaeter aus der T-Pose geblendet.
-                print("[retarget] Bewegungsfenster: Frames %d-%d von %d"
-                      % (win[0], win[1], len(seq.frames)))
-                curves = {name: qs[win[0]:win[1] + 1]
-                          for name, qs in curves.items()}
-
         curves = webviewer.resample(curves, seq.fps, PLAYBACK_FPS)
         frames = webviewer.frames(self._rig_data(), curves, str(self.glb_path))
-        if gesture and self.anchor and frames:
+        if anchor and self.anchor and frames:
             rest = webviewer.rest_frame(str(self.glb_path), list(frames[0]))
             frames = webviewer.anchor_rest(frames, PLAYBACK_FPS, rest=rest)
         return frames
@@ -283,10 +441,11 @@ class retarget(LangPlugin):
 
     def _play_data(self, data, label):
         """Aufnahme (Keypoint-Dict) direkt abspielen, inkl. T-Pose-Blende."""
-        self._send(self._frames_from_recording(data, gesture=True), label)
+        self._send(self._frames_from_recording(data, anchor=True), label)
         self._last_data = data
         self._last_label = label
         self._last_path = None
+        self._last_sentence = None
 
     def _play(self, path):
         target = _resolve(path)
@@ -311,3 +470,4 @@ class retarget(LangPlugin):
         self._last_path = str(target)
         self._last_data = None
         self._last_label = None
+        self._last_sentence = None

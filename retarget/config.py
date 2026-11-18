@@ -120,10 +120,10 @@ FRAME_MARGIN = 0.05
 SMOOTH_SEC = 0.20
 
 # Welche Arme dem Bild folgen.
-#   "both"  beide Arme (Standard fuer echte 3D-/RTMLib-Aufnahmen)
+#   "both"  beide Arme
 #   "sign"  nur der Gebaerdearm; der andere Arm haengt entspannt herab
-#   "auto"  "sign" fuer .pev (dort ist der zweite Arm stark verdeckt/verrauscht),
-#           sonst "both"
+#   "auto"  "both" fuer alle Quellen (die neu erzeugten .pev-Dateien haben
+#           eine korrekte 2D-Pose); "sign" nur noch explizit per Env
 ARM_MODE = "auto"
 
 # Entspannte Armhaltung im Armature-Raum (x rechts, y Tiefe, z oben). Der

@@ -15,10 +15,13 @@ vorn positiv und aus der 2D-Verkuerzung rekonstruiert.
 Zwei Backends stehen zur Verfuegung:
 
 ``rtmlib``   (Standard) ``rtmlib.Wholebody`` liefert die 2D-Punkte direkt.
-             RTMLib ist installiert, braucht kein 3D-Lifting und damit auch
-             nicht das Paket ``pose_estimation_recognition_utils``.
+             Standard-Engine ist ``opencv`` (cv2.dnn), dafuer wird das Paket
+             ``onnxruntime`` nicht gebraucht; ``--rtmlib-backend onnxruntime``
+             schaltet die alte Engine ein. Die RTMLib-Gewichte sind immer
+             ``.onnx``-Dateien.
 ``official`` ``pose_estimation_recognition_utils_rtmlib.RTMPoseEstimator3D``
-             (2D + ONNX-Lifting). Optional, falls das Paket installiert ist.
+             (2D + ONNX-Lifting). Optional, falls das Paket installiert ist,
+             und nur noch fuer Vergleichszwecke gedacht.
 
 Die Tiefe (z) wird in beiden Faellen mit ``repair_pev.reconstruct_depth``
 neu aufgebaut: das Lifting-Modell skaliert beim Zurueckrechnen nur x/y, das
@@ -65,10 +68,13 @@ class ExtractionError(RuntimeError):
 
 # --- Geraet und Modelle ----------------------------------------------------
 
-def detect_device(preferred='auto'):
-    """``cpu``/``cuda``; ``auto`` nimmt CUDA, wenn onnxruntime es anbietet."""
+def detect_device(preferred='auto', backend='opencv'):
+    """``cpu``/``cuda``; ``auto`` nimmt CUDA nur mit passender Engine."""
     if preferred and preferred != 'auto':
         return preferred
+    if backend != 'onnxruntime':
+        # OpenCV-CUDA gibt es nur mit selbst gebautem OpenCV.
+        return 'cpu'
     try:
         import onnxruntime as ort
         if 'CUDAExecutionProvider' in ort.get_available_providers():
@@ -78,15 +84,19 @@ def detect_device(preferred='auto'):
     return 'cpu'
 
 
-def make_rtmlib_estimator(device, mode='balanced'):
-    """``rtmlib.Wholebody`` (COCO-WholeBody, 133 Punkte)."""
+def make_rtmlib_estimator(device, mode='balanced', backend='opencv'):
+    """``rtmlib.Wholebody`` (COCO-WholeBody, 133 Punkte).
+
+    ``opencv`` (Standard) nutzt ``cv2.dnn`` und braucht das Paket
+    ``onnxruntime`` nicht; die Modellgewichte bleiben ``.onnx``-Dateien.
+    """
     try:
         from rtmlib import Wholebody
     except ImportError as exc:                             # noqa: BLE001
         raise ExtractionError(
             'RTMLib fehlt (pip install rtmlib opencv-python): %s' % exc) from exc
     return Wholebody(to_openpose=False, mode=mode,
-                     backend='onnxruntime', device=device)
+                     backend=backend, device=device)
 
 
 def make_official_estimator(device, mode, cache_dir=None):
@@ -288,8 +298,16 @@ def write_pev(path, data, backup=False):
     os.replace(tmp, path)
 
 
-def find_videos(videos_root):
-    return sorted(Path(videos_root).rglob('*.mp4'))
+def find_videos(videos_root, ids=None):
+    videos = sorted(Path(videos_root).rglob('*.mp4'))
+    if ids:
+        wanted = {str(i).strip().lower() + '.mp4' for i in ids if str(i).strip()}
+        videos = [v for v in videos if v.name.lower() in wanted]
+    return videos
+
+
+def parse_ids(value):
+    return [part.strip() for part in (value or '').split(',') if part.strip()]
 
 
 # --- Ablauf ----------------------------------------------------------------
@@ -301,7 +319,7 @@ def run(args):
         print('Videoordner fehlt: %s' % videos_root)
         return 1
 
-    videos = find_videos(videos_root)
+    videos = find_videos(videos_root, parse_ids(args.ids))
     if args.limit:
         videos = videos[:args.limit]
     if not videos:
@@ -321,15 +339,20 @@ def run(args):
         print('Alles vorhanden (mit --overwrite neu erzeugen).')
         return 0
 
-    device = detect_device(args.device)
+    device = detect_device(args.device,
+                           'onnxruntime' if args.backend == 'official'
+                           else args.rtmlib_backend)
     mode = args.mode or ('individual' if args.backend == 'official'
                          else 'balanced')
-    print('Backend %s, Geraet %s, Modus %s' % (args.backend, device, mode))
+    engine = '2D+Lifting' if args.backend == 'official' else args.rtmlib_backend
+    print('Backend %s (%s), Geraet %s, Modus %s'
+          % (args.backend, engine, device, mode))
     try:
         if args.backend == 'official':
             estimator = make_official_estimator(device, mode, args.cache_dir)
         else:
-            estimator = make_rtmlib_estimator(device, mode)
+            estimator = make_rtmlib_estimator(device, mode,
+                                              args.rtmlib_backend)
     except ExtractionError as exc:
         print('FEHLER: %s' % exc)
         return 1
@@ -378,6 +401,12 @@ def build_parser():
     parser.add_argument('--backend', choices=('rtmlib', 'official', 'auto'),
                         default='rtmlib',
                         help='rtmlib (Standard) oder official (2D+Lifting)')
+    parser.add_argument('--rtmlib-backend',
+                        choices=('opencv', 'onnxruntime', 'openvino'),
+                        default=os.environ.get('AVATAR_RTMLIB_BACKEND', 'opencv'),
+                        help='Inferenz-Engine fuer rtmlib; opencv braucht kein '
+                             'onnxruntime (Standard: opencv bzw. '
+                             'AVATAR_RTMLIB_BACKEND)')
     parser.add_argument('--device', default='auto',
                         help='auto, cpu oder cuda (Standard: auto)')
     parser.add_argument('--mode', default=None,
@@ -393,6 +422,9 @@ def build_parser():
                         help='vorhandene PEVs vorher als *.pev.bak sichern')
     parser.add_argument('--limit', type=int, default=0,
                         help='nur die ersten N Videos verarbeiten')
+    parser.add_argument('--ids', default=None,
+                        help='nur diese Video-IDs verarbeiten (z. B. '
+                             '"861,61,841")')
     parser.add_argument('--cache_dir', default=None,
                         help='Modellcache des offiziellen Backends')
     parser.add_argument('--dry-run', action='store_true',

@@ -173,7 +173,7 @@ class PoseEstimator2D:
     def __init__(
             self,
             mode: str = 'performance',
-            backend: str = 'onnxruntime',
+            backend: str = 'opencv',
             device: str = 'cpu',
             to_openpose: bool = False,
             kpt_threshold: float = 0.8  # Erhöht auf 0.8 für hohe Qualität

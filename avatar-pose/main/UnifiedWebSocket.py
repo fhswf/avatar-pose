@@ -18,8 +18,10 @@ from pygltflib import GLTF2
 import copy
 
 # So viele Frames bleiben im Puffer, bevor die aeltesten verworfen werden
-# (30 fps * 30 s). Ein Client, der laenger hinterherhaengt, springt nach vorn.
-HISTORY_FRAMES = 900
+# (30 fps * 120 s). Ein Client, der laenger hinterherhaengt, springt nach vorn.
+# 120 s statt 30 s, damit auch ganze Saetze aus mehreren Gebaerden Platz haben
+# und nicht am Anfang abgeschnitten werden.
+HISTORY_FRAMES = 3600
 
 
 class UnifiedWebSocket:

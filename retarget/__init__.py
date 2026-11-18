@@ -14,13 +14,13 @@ Spalten (dieselbe Lesart wie in Blender). Am WebSocket/JSON-Ausgang wird nach
     frames = webviewer.frames(rig, kurven, "avatar.glb")     # Webviewer-Format
 """
 
-from . import (config, depth, filters, hands, landmarks, metrics, retarget,
-               rotations, rtm_adapter, webviewer)
+from . import (config, depth, filters, gloss, hands, landmarks, metrics,
+               retarget, rotations, rtm_adapter, sentence, webviewer)
 from .rig import Rig
 from .sequence import Sequence
 
 __version__ = "0.1.0"
 
-__all__ = ["Rig", "Sequence", "config", "depth", "filters", "hands",
+__all__ = ["Rig", "Sequence", "config", "depth", "filters", "gloss", "hands",
            "landmarks", "metrics", "retarget", "rotations", "rtm_adapter",
-           "webviewer"]
+           "sentence", "webviewer"]

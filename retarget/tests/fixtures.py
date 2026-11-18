@@ -108,6 +108,23 @@ def toy_sequence(n=40, elbow=(0.60, 0.59), wrist=(0.60, 0.83), hands=True,
             "n": n, "hands": "holistic_labeled", "frames": frames}
 
 
+def pev_frames(n=12):
+    """PEV-Frames (``skeletonpoints``) aus den RTMLib-Spielzeugdaten."""
+    out = []
+    for index, rec in enumerate(rtm_frames(n=n)):
+        points = []
+        for idx, (x, y) in enumerate(rec["keypoints"][0]):
+            points.append({
+                "id": idx,
+                "x": float(x),
+                "y": float(y),
+                "z": 0.0,
+                "confidence": float(rec["scores"][0][idx]),
+            })
+        out.append({"frame_video": index, "skeletonpoints": points})
+    return out
+
+
 def rtm_frames(n=12, persons=1, with_3d=False, hands=True):
     """Rohe RTMLib-Frames ``keypoints``/``scores`` im COCO-Layout."""
     body = {0: (320, 100), 1: (310, 95), 2: (330, 95), 3: (300, 100),
