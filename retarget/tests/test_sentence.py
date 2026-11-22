@@ -63,6 +63,14 @@ def test_signs_fuer_wort_teile_und_buchstaben():
     assert sentence.spell_word("Ä", {"AE": "99"}) == [
         sentence.Sign("Ä", "99", spelled=True)]
 
+    # Ohne AE/OE/UE-Eintrag zerfaellt der Umlaut in zwei Buchstaben (wie gsg).
+    spread = {"A": "11", "E": "12", "R": "13", "G": "14",
+              "U": "15", "B": "16"}
+    assert [sign.label for sign in sentence.spell_word("Ärger", spread)] == [
+        "A", "E", "R", "G", "E", "R"]
+    assert [sign.label for sign in sentence.spell_word("Über", spread)] == [
+        "U", "E", "B", "E", "R"]
+
     # SCH wird wie in gsg.py zu einer Gebaerde zusammengefasst.
     assert [sign.label for sign in sentence.spell_word(
         "Schule", {"SCH": "1", "U": "2", "L": "3", "E": "4"})] == [

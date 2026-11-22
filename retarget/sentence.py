@@ -28,6 +28,7 @@ _UMLAUTE = (("AE", "Ä"), ("OE", "Ö"), ("UE", "Ü"))
 # Rueckrichtung: einzelne Umlautbuchstaben werden in der gsg-Wortliste meist
 # als AE/OE/UE gefuehrt (Vorlage: gsg.py behaelt Umlaute beim Buchstabieren).
 _UMLAUTE_BACK = (("Ä", "AE"), ("Ö", "OE"), ("Ü", "UE"))
+_UMLAUTE_SPREAD = dict(_UMLAUTE_BACK)
 
 
 class Sign(NamedTuple):
@@ -102,6 +103,9 @@ def lookup_id(words, token):
 def spell_word(word, words):
     """Buchstabieren wie in ``gsg.py``: ein Zeichen pro Gebaerde, ``SCH`` zusammen.
 
+    Umlaute werden zuerst als ``AE/OE/UE``-Gebaerde versucht. Gibt es dafuer
+    keinen Eintrag, zerfallen sie in zwei Buchstaben (``Ä -> A, E``), damit der
+    Laut nicht verloren geht. ``ß`` wird beim Grossschreiben zu ``SS``.
     Nicht-Buchstaben (Bindestriche, Satzzeichen, Ziffern) fallen weg. Fehlt ein
     Buchstabe in der Wortliste, wird er ausgelassen; der Aufrufer kann die
     uebrigen Zeichen trotzdem abspielen.
@@ -111,11 +115,16 @@ def spell_word(word, words):
     chunks = []
     i = 0
     while i < len(letters):
+        char = letters[i]
+        if char in _UMLAUTE_SPREAD and lookup_id(words, char) is None:
+            chunks.extend(_UMLAUTE_SPREAD[char])
+            i += 1
+            continue
         if "".join(letters[i:i + 3]) == "SCH":
             chunks.append("SCH")
             i += 3
         else:
-            chunks.append(letters[i])
+            chunks.append(char)
             i += 1
     signs = []
     for chunk in chunks:

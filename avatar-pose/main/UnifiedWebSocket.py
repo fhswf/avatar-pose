@@ -16,12 +16,16 @@ import json
 import numpy as np
 from pygltflib import GLTF2
 import copy
+from pathlib import Path
 
 # So viele Frames bleiben im Puffer, bevor die aeltesten verworfen werden
 # (30 fps * 120 s). Ein Client, der laenger hinterherhaengt, springt nach vorn.
 # 120 s statt 30 s, damit auch ganze Saetze aus mehreren Gebaerden Platz haben
 # und nicht am Anfang abgeschnitten werden.
 HISTORY_FRAMES = 3600
+
+# Absolut, damit der Server auch aus einem anderen Arbeitsverzeichnis startet.
+GLB_PATH = Path(__file__).resolve().parents[1] / "webviewer" / "media" / "avatar.glb"
 
 
 class UnifiedWebSocket:
@@ -36,7 +40,7 @@ class UnifiedWebSocket:
         :type language_class: class
         """
         self.t_pose = {}
-        self.load_gltf_data("../webviewer/media/avatar.glb")
+        self.load_gltf_data(str(GLB_PATH))
         self.language_module = language_class(self)
 
         first_position = copy.deepcopy(self.t_pose)
@@ -133,7 +137,7 @@ class UnifiedWebSocket:
         """
         self.send_objects.append(send_object)
         self._next_index += 1
-        # Etwa 30 Sekunden Historie reichen fuer den langsamsten Client.
+        # Etwa 120 Sekunden Historie reichen fuer den langsamsten Client.
         if len(self.send_objects) > HISTORY_FRAMES:
             del self.send_objects[:len(self.send_objects) - HISTORY_FRAMES]
 

@@ -26,6 +26,7 @@ if __name__ == "__main__":
     """
     # Plugin per Umgebungsvariable waehlen, Standard bleibt "gsg".
     language = os.environ.get("AVATAR_PLUGIN", "gsg").strip() or "gsg"
+    print(f"[main] Plugin: {language}", flush=True)
     language_module = importlib.import_module(f"plugins.{language}.{language}")
     language_class = getattr(language_module, language)
 
